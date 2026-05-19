@@ -1,59 +1,107 @@
-import sqlite3
-from datetime import date
 import streamlit as st
 import pandas as pd
+from datetime import date, datetime
+import firebase_admin
+from firebase_admin import credentials, firestore
+import requests
 
-DB = "control_vehiculo.db"
+# ---------------------- CONFIGURACIÓN FIREBASE ----------------------
+if not firebase_admin._apps:
+    cred = credentials.Certificate(dict(st.secrets["firebase"]))
+    firebase_admin.initialize_app(cred)
 
-# ---------------------- DB ----------------------
-def get_conn():
-    return sqlite3.connect(DB, check_same_thread=False)
+db = firestore.client()
+COLLECTION_NAME = "registros"
+API_KEY = st.secrets["firebase"]["api_key"]
 
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS registros (
-            fecha TEXT PRIMARY KEY,
-            recaudacion INTEGER,
-            conductor INTEGER,
-            bono INTEGER,
-            combustible INTEGER,
-            liquidacion INTEGER,
-            repuestos INTEGER,
-            detalle_repuestos TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+# ---------------------- AUTENTICACIÓN ----------------------
+def login_usuario(email, password):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={API_KEY}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    response = requests.post(url, json=payload)
+    return response.json()
 
+def registrar_usuario(email, password):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={API_KEY}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    response = requests.post(url, json=payload)
+    return response.json()
+
+def check_login():
+    if "user" not in st.session_state:
+        st.session_state.user = None
+
+    if st.session_state.user is None:
+        st.title("🔐 Acceso al Sistema")
+        
+        tab1, tab2 = st.tabs(["Iniciar Sesión", "Crear Cuenta Nueva"])
+        
+        with tab1:
+            st.subheader("Ingresa con tu cuenta")
+            email_login = st.text_input("Correo electrónico", key="login_email")
+            password_login = st.text_input("Contraseña", type="password", key="login_pass")
+            
+            if st.button("Iniciar Sesión"):
+                result = login_usuario(email_login, password_login)
+                if "idToken" in result:
+                    st.session_state.user = email_login
+                    st.success("¡Acceso concedido!")
+                    st.rerun()
+                else:
+                    st.error("Credenciales incorrectas. Intenta de nuevo.")
+                    
+        with tab2:
+            st.subheader("Registro de nuevos conductores")
+            email_reg = st.text_input("Correo electrónico", key="reg_email")
+            password_reg = st.text_input("Contraseña (mínimo 6 caracteres)", type="password", key="reg_pass")
+            
+            if st.button("Crear mi cuenta"):
+                if len(password_reg) < 6:
+                    st.warning("La contraseña debe tener al menos 6 caracteres.")
+                else:
+                    result = registrar_usuario(email_reg, password_reg)
+                    if "idToken" in result:
+                        db.collection("usuarios_registrados").document(email_reg).set({
+                            "email": email_reg,
+                            "fecha_registro": datetime.now().isoformat()
+                        })
+                        st.success("✅ Cuenta creada exitosamente. Ve a la pestaña 'Iniciar Sesión' para entrar.")
+                    else:
+                        error_msg = result.get("error", {}).get("message", "Error desconocido")
+                        if error_msg == "EMAIL_EXISTS":
+                            st.error("Este correo ya está registrado en el sistema.")
+                        else:
+                            st.error(f"Error al crear cuenta: {error_msg}")
+                            
+        st.stop()
+
+# ---------------------- BASE DE DATOS FIRESTORE ----------------------
 def guardar_o_actualizar(fecha, recaudacion, conductor, bono, combustible, liquidacion, repuestos, detalle):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO registros VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(fecha) DO UPDATE SET
-            recaudacion=excluded.recaudacion,
-            conductor=excluded.conductor,
-            bono=excluded.bono,
-            combustible=excluded.combustible,
-            liquidacion=excluded.liquidacion,
-            repuestos=excluded.repuestos,
-            detalle_repuestos=excluded.detalle_repuestos
-    """, (fecha, int(recaudacion), int(conductor), int(bono), int(combustible), int(liquidacion), int(repuestos), detalle))
-    conn.commit()
-    conn.close()
+    doc_ref = db.collection(COLLECTION_NAME).document(fecha)
+    doc_ref.set({
+        "recaudacion": int(recaudacion),
+        "conductor": int(conductor),
+        "bono": int(bono),
+        "combustible": int(combustible),
+        "liquidacion": int(liquidacion),
+        "repuestos": int(repuestos),
+        "detalle_repuestos": detalle
+    }, merge=True)
 
 def obtener_datos():
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM registros ORDER BY fecha ASC", conn)
-    conn.close()
-
+    docs = db.collection(COLLECTION_NAME).stream()
+    data = []
+    for doc in docs:
+        row = doc.to_dict()
+        row["fecha"] = doc.id
+        data.append(row)
+        
+    df = pd.DataFrame(data)
     if not df.empty:
-        cols = ["recaudacion","conductor","bono","combustible","liquidacion","repuestos"]
+        df = df.sort_values(by="fecha", ascending=True)
+        cols = ["recaudacion", "conductor", "bono", "combustible", "liquidacion", "repuestos"]
         for col in cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
     return df
 
 # ---------------------- CALCULOS ----------------------
@@ -64,14 +112,22 @@ def calcular(df):
     df["acumulado"] = df["ganancia"].cumsum()
     return df
 
-# ---------------------- APP ----------------------
+# ---------------------- APP PRINCIPAL ----------------------
 def main():
     st.set_page_config(page_title="Control Vehículo", layout="wide")
-    init_db()
+    
+    # Validar acceso primero
+    check_login()
 
-    st.title("🚕 Control Diario de Vehículo")
+    # Botón para cerrar sesión
+    st.sidebar.write(f"👤 Usuario: {st.session_state.user}")
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state.user = None
+        st.rerun()
 
-    # -------- FORM --------
+    st.title("🚕 Control Diario de Vehículo (Cloud)")
+
+    # -------- FORMULARIO --------
     with st.form("form", clear_on_submit=True):
         fecha = st.date_input("Fecha", value=date.today())
         recaudacion = st.number_input("Recaudación", min_value=0, step=1000)
@@ -105,14 +161,13 @@ def main():
                 fecha.isoformat(), recaudacion, conductor, bono,
                 combustible, liquidacion, repuestos, detalle
             )
-            st.success("Guardado correctamente")
+            st.success("Guardado correctamente en la nube ☁️")
             st.rerun()
 
-    # -------- DATA --------
+    # -------- DATOS --------
     df = obtener_datos()
-
     if df.empty:
-        st.warning("Sin datos")
+        st.warning("Sin datos en Firebase")
         return
 
     df = calcular(df)
@@ -133,25 +188,22 @@ def main():
     ganancia_total = int(df["ganancia"].sum())
 
     st.subheader("Resumen")
-    c1,c2,c3,c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Recaudado", f"${total_recaudado:,}".replace(",","."))
     c2.metric("Conductor", f"${total_conductor:,}".replace(",","."))
     c3.metric("Gastos", f"${total_gastos:,}".replace(",","."))
     c4.metric("Ganancia", f"${ganancia_total:,}".replace(",","."))
 
-    # -------- ALERTAS --------
     if ganancia_total < 0:
         st.error("Estás en pérdida en el periodo seleccionado")
 
-    # -------- HISTORIAL --------
+    # -------- HISTORIAL Y GRAFICO --------
     st.subheader("Historial")
     st.dataframe(df, use_container_width=True)
 
-    # -------- EXPORT --------
     csv = df.to_csv(index=False).encode()
     st.download_button("Descargar CSV", csv, "reporte.csv", "text/csv")
 
-    # -------- GRAFICO --------
     st.subheader("Evolución")
     st.line_chart(df.set_index("fecha")["acumulado"])
 
