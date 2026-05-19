@@ -9,7 +9,6 @@ DB = "control_vehiculo.db"
 def get_conn():
     return sqlite3.connect(DB, check_same_thread=False)
 
-
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -28,7 +27,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def guardar_o_actualizar(fecha, recaudacion, conductor, bono, combustible, liquidacion, repuestos, detalle):
     conn = get_conn()
     c = conn.cursor()
@@ -45,7 +43,6 @@ def guardar_o_actualizar(fecha, recaudacion, conductor, bono, combustible, liqui
     """, (fecha, int(recaudacion), int(conductor), int(bono), int(combustible), int(liquidacion), int(repuestos), detalle))
     conn.commit()
     conn.close()
-
 
 def obtener_datos():
     conn = get_conn()
@@ -79,13 +76,21 @@ def main():
         fecha = st.date_input("Fecha", value=date.today())
         recaudacion = st.number_input("Recaudación", min_value=0, step=1000)
 
-        conductor = int(recaudacion * 0.3)
-        bono = 4000
+        # NUEVO: Opciones para elegir si se aplica conductor y/o bono
+        col_opcion1, col_opcion2 = st.columns(2)
+        with col_opcion1:
+            aplicar_conductor = st.checkbox("Agregar % conductor (30%)", value=True)
+        with col_opcion2:
+            aplicar_bono = st.checkbox("Agregar Bono ($4.000)", value=True)
+
+        # Lógica de cálculo basada en los clicks
+        conductor = int(recaudacion * 0.3) if aplicar_conductor else 0
+        bono = 4000 if aplicar_bono else 0
         total_conductor = conductor + bono
 
-        st.info(f"30% conductor: ${conductor:,}".replace(",","."))
+        st.info(f"Porcentaje conductor: ${conductor:,}".replace(",","."))
         st.info(f"Bono: ${bono:,}".replace(",","."))
-        st.write(f"Total conductor: ${total_conductor:,}".replace(",","."))
+        st.write(f"**Total conductor: ${total_conductor:,}**".replace(",","."))
 
         col1, col2 = st.columns(2)
         with col1:
@@ -149,7 +154,6 @@ def main():
     # -------- GRAFICO --------
     st.subheader("Evolución")
     st.line_chart(df.set_index("fecha")["acumulado"])
-
 
 if __name__ == "__main__":
     main()
